@@ -1,4 +1,3 @@
-# --- CONFIGURATION ---
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -41,11 +40,12 @@ def local_css():
 
             /* Login Page Wrapper */
             .login-container {
-                max-width: 450px;
+                max-width: 30px;
                 margin: 3rem auto;
                 padding: 2rem;
                 background-color: #1e1f20;
                 border-radius: 12px;
+                display: none
             }
             
             /* Chat Input - Re-centered and adjusted */
@@ -96,21 +96,34 @@ def local_css():
     """, unsafe_allow_html=True)
 
 
-# --- DATABASE FUNCTIONS (with User Auth) ---
+# --- DATABASE FUNCTIONS (with User Auth and AUTO-MIGRATION) ---
 def init_db():
     conn = sqlite3.connect('security_prompt_detection.db')
     c = conn.cursor()
-    # Prompts table
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS prompts (
-        id TEXT PRIMARY KEY, prompt TEXT, is_malicious BOOLEAN, confidence REAL,
-        timestamp TEXT, flagged_patterns TEXT, model_used TEXT, username TEXT
-    )''')
-    # Users table
+
+    # Create users table if it doesn't exist
     c.execute('''
     CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY, password_hash TEXT
     )''')
+
+    # Create prompts table if it doesn't exist
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS prompts (
+        id TEXT PRIMARY KEY, prompt TEXT, is_malicious BOOLEAN, confidence REAL,
+        timestamp TEXT, flagged_patterns TEXT
+    )''')
+
+    # --- AUTOMATIC MIGRATION ---
+    c.execute("PRAGMA table_info(prompts)")
+    columns = [row[1] for row in c.fetchall()]
+    
+    if 'username' not in columns:
+        c.execute("ALTER TABLE prompts ADD COLUMN username TEXT")
+    
+    if 'model_used' not in columns:
+        c.execute("ALTER TABLE prompts ADD COLUMN model_used TEXT")
+    
     conn.commit()
     conn.close()
 
@@ -143,7 +156,7 @@ def save_to_db(prompt_text, analysis, username):
     prompt_id = hashlib.md5(f"{prompt_text}_{time.time()}".encode()).hexdigest()
     flagged_patterns = ", ".join(analysis["flagged_patterns"])
     c.execute(
-        "INSERT INTO prompts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO prompts (id, prompt, is_malicious, confidence, timestamp, flagged_patterns, model_used, username) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (prompt_id, prompt_text, analysis["is_malicious"], analysis["confidence"],
          datetime.now().isoformat(), flagged_patterns, analysis["model_used"], username)
     )
@@ -160,7 +173,7 @@ def get_history_by_user(username):
     return df
 
 
-# --- API ANALYSIS FUNCTION (No changes) ---
+# --- API ANALYSIS FUNCTION (FIXED) ---
 def analyze_prompt_with_groq(prompt_text):
     system_prompt = """
     You are an expert security system specialized in detecting prompt injection attacks.
@@ -187,7 +200,14 @@ def analyze_prompt_with_groq(prompt_text):
             "model_used": "llama-3.1-8b-instant"
         }
     except Exception as e:
-        return {"is_malicious": False, "confidence": 0.0, "reasoning": f"Error: {e}", "flagged_patterns": []}
+        # FIXED: Ensure 'model_used' key is always present, even on error
+        return {
+            "is_malicious": False, 
+            "confidence": 0.0, 
+            "reasoning": f"Error: {e}", 
+            "flagged_patterns": [], 
+            "model_used": "error"
+        }
 
 
 # --- UI COMPONENTS ---
@@ -292,7 +312,7 @@ def logout():
 # --- MAIN APP LOGIC ---
 def main():
     local_css()
-    init_db()
+    init_db() # This will now create AND upgrade the database
 
     if not GROQ_API_KEY:
         st.error("GROQ_API_KEY is not configured. Please set it in your .env file.")
